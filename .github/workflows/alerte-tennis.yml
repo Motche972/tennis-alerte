@@ -1,0 +1,71 @@
+name: Alerte tennis
+
+on:
+  schedule:
+    # Toutes les 20 min, de 7h à 21h40 heure de Paris l'été (6h-20h40 l'hiver).
+    # Les heures du cron sont en UTC.
+    - cron: '7,27,47 5-19 * * *'
+  workflow_dispatch:
+    inputs:
+      test_notif:
+        description: "Envoyer seulement une notification de test"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alerte-tennis
+  cancel-in-progress: false
+
+jobs:
+  surveiller:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Installer les dépendances
+        run: npm install --no-audit --no-fund
+
+      - name: Cache du navigateur
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1
+
+      - name: Installer Chromium
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Récupérer les créneaux déjà signalés
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: etat-${{ github.run_id }}
+          restore-keys: etat-
+
+      - name: Notification de test
+        if: ${{ inputs.test_notif }}
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: npm run test-notif
+
+      - name: Vérifier les créneaux
+        if: ${{ !inputs.test_notif }}
+        env:
+          ACCOUNT_EMAIL: ${{ secrets.ACCOUNT_EMAIL }}
+          ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: npm run watch
+
+      - name: Mémoriser les créneaux signalés
+        if: ${{ always() && !inputs.test_notif }}
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: etat-${{ github.run_id }}
