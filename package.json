@@ -1,0 +1,16 @@
+{
+  "name": "tennis-alerte",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Alerte ntfy quand un court se libère à Mourlon ou Montherlant (Paris Tennis), 18h-19h",
+  "type": "module",
+  "scripts": {
+    "watch": "node watch.js",
+    "test-notif": "node watch.js --test-notif",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  },
+  "license": "MIT"
+}
