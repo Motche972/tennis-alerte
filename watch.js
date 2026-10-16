@@ -1,16 +1,17 @@
-// Alerte créneaux Paris Tennis — Mourlon (15e) et Montherlant (16e), 18h et 19h, 7 jours visibles.
-// Ne réserve rien : lit le planning et envoie une notification ntfy pour chaque nouveau créneau libre.
-// Endpoint et parsing du planning repris du projet open source par-ici-tennis (licence MIT).
+// Alerte créneaux Paris Tennis — Mourlon (15e) et Montherlant (16e).
+// Les demandes sont des tickets GitHub (ex. "ven 23/10 17h"). Quand un court se libère,
+// le robot commente le ticket (GitHub t'envoie un mail) et envoie une notif ntfy.
+// Il ne réserve rien. Chargement du planning repris de par-ici-tennis (licence MIT).
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { chromium } from 'playwright'
 import {
-  planningDates, matchLocations, filterSlots, slotKey, newSlots, buildMessage,
+  parseRequest, daysFromToday, describeRequest, parisNow, matchLocations,
+  filterSlots, slotKey, newSlots, buildMessage,
 } from './lib/logic.js'
 
 // ---------- Réglages ----------
 const CENTRES = ['mourlon', 'montherlant'] // mots-clés cherchés dans l'annuaire officiel
-const HEURES = [18, 19]                    // heures de début de créneau surveillées
 const LIEN_RESA = 'https://tennis.paris.fr/tennis/'
 const STATE_FILE = 'state/seen.json'
 const ERROR_REPEAT_HOURS = 6               // une alerte d'erreur max toutes les 6 h
@@ -20,11 +21,14 @@ const LOCATIONS_URL = 'https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=t
 const START_URL = 'https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=tennis&view=start&full=1'
 const PLANNING_URL = 'https://tennis.paris.fr/tennis/jsp/site/Portal.jsp?page=recherche&action=ajax_load_planning'
 
-const { ACCOUNT_EMAIL, ACCOUNT_PASSWORD, NTFY_TOPIC } = process.env
+const {
+  ACCOUNT_EMAIL, ACCOUNT_PASSWORD, NTFY_TOPIC, GITHUB_TOKEN, GITHUB_REPOSITORY, REPO_OWNER,
+} = process.env
 const TEST_MODE = process.argv.includes('--test-notif')
 
+// ---------- Notifications ----------
 const notify = async ({ title, message, priority = 4, tags = ['tennis'] }) => {
-  if (!NTFY_TOPIC) throw new Error('Secret NTFY_TOPIC manquant.')
+  if (!NTFY_TOPIC) return
   const response = await fetch('https://ntfy.sh/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -34,22 +38,45 @@ const notify = async ({ title, message, priority = 4, tags = ['tennis'] }) => {
   if (!response.ok) throw new Error(`ntfy a répondu HTTP ${response.status}`)
 }
 
-const loadState = async () => {
-  try {
-    return JSON.parse(await readFile(STATE_FILE, 'utf8'))
-  } catch {
-    return { seen: [], lastErrorAt: null }
-  }
+// ---------- Tickets GitHub ----------
+const github = async (path, options = {}) => {
+  const response = await fetch(`https://api.github.com/repos/${GITHUB_REPOSITORY}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+  })
+  if (!response.ok) throw new Error(`GitHub ${path} : HTTP ${response.status}`)
+  return response.json()
 }
 
+const openRequests = async () => {
+  const issues = await github(`/issues?state=open&per_page=50&creator=${REPO_OWNER}`)
+  return issues.filter(issue => !issue.pull_request)
+}
+const comment = (number, body) => github(`/issues/${number}/comments`, { method: 'POST', body: JSON.stringify({ body }) })
+const close = number => github(`/issues/${number}`, { method: 'PATCH', body: JSON.stringify({ state: 'closed', state_reason: 'completed' }) })
+
+// ---------- Mémoire entre deux passages ----------
+const loadState = async () => {
+  try {
+    const state = JSON.parse(await readFile(STATE_FILE, 'utf8'))
+    return { issues: state.issues || {}, lastErrorAt: state.lastErrorAt || null }
+  } catch {
+    return { issues: {}, lastErrorAt: null }
+  }
+}
 const saveState = async state => {
   await mkdir('state', { recursive: true })
   await writeFile(STATE_FILE, JSON.stringify(state, null, 2))
 }
 
+// ---------- Paris Tennis ----------
 const login = async browser => {
   if (!ACCOUNT_EMAIL || !ACCOUNT_PASSWORD) {
-    throw new Error('Secrets ACCOUNT_EMAIL / ACCOUNT_PASSWORD manquants.')
+    throw new Error('Secrets ACCOUNT_EMAIL / ACCOUNT_PASSWORD manquants dans GitHub.')
   }
   const page = await browser.newPage()
   page.setDefaultTimeout(60000)
@@ -70,8 +97,7 @@ const officialLocationNames = async page => {
   await page.goto(LOCATIONS_URL)
   const html = await page.content()
   const marker = html.search(/var\s+tennis\s*=/)
-  if (marker < 0) throw new Error("Annuaire des tennis introuvable (le site a peut-être changé).")
-  // Lecture du JSON "var tennis = {...}" en comptant les accolades
+  if (marker < 0) throw new Error('Annuaire des tennis introuvable (le site a peut-être changé).')
   const start = html.indexOf('{', marker)
   let depth = 0; let inString = false; let escaped = false
   for (let i = start; i < html.length; i += 1) {
@@ -89,7 +115,7 @@ const officialLocationNames = async page => {
       return [...new Set(directory.features.map(f => f.properties.general._nomSrtm))]
     }
   }
-  throw new Error("Annuaire des tennis illisible (le site a peut-être changé).")
+  throw new Error('Annuaire des tennis illisible (le site a peut-être changé).')
 }
 
 const readPlanning = async (page, location, date) => {
@@ -131,6 +157,13 @@ const readPlanning = async (page, location, date) => {
   })))
 }
 
+const openingLabel = date => {
+  const [dd, mm, yyyy] = date.split('/').map(Number)
+  const dt = new Date(Date.UTC(yyyy, mm - 1, dd - 6, 12))
+  return `${String(dt.getUTCDate()).padStart(2, '0')}/${String(dt.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+// ---------- Passage ----------
 const run = async () => {
   if (TEST_MODE) {
     await notify({ title: '🎾 Test réussi', message: 'Les alertes tennis arriveront ici.', priority: 3 })
@@ -139,47 +172,100 @@ const run = async () => {
   }
 
   const state = await loadState()
-  const browser = await chromium.launch({ headless: true })
+  const issues = await openRequests()
+  const known = {}
+  const active = []
+  const currentHour = parisNow().hour
+
+  for (const issue of issues) {
+    const previous = state.issues[issue.number] || {}
+    const request = parseRequest(issue.title)
+
+    if (request.error) {
+      if (previous.errorTitle !== issue.title) {
+        await comment(issue.number, `🤔 Je n'ai pas compris cette demande : ${request.error}.\n\nModifie le titre du ticket, par exemple \`ven 23/10 17h\`, \`vendredi 17h-19h\` ou \`demain 18h 19h\`.`)
+      }
+      known[issue.number] = { errorTitle: issue.title }
+      continue
+    }
+
+    const key = `${request.date}|${request.hours.join(',')}`
+    const delta = daysFromToday(request.date)
+    const over = delta < 0 || (delta === 0 && Math.max(...request.hours) <= currentHour)
+    if (over) {
+      await comment(issue.number, '⏱️ Ce créneau est passé, je ferme la demande.')
+      await close(issue.number)
+      console.log(`#${issue.number} : date passée, ticket fermé.`)
+      continue
+    }
+
+    const entry = previous.key === key ? previous : { key, seen: [] }
+    if (!entry.acked) {
+      let body = `✅ Bien reçu. Je surveille **Mourlon (15e)** et **Montherlant (16e)** pour le **${describeRequest(request)}**.\n\nJe commente ici dès qu'un court se libère : tu reçois un mail à chaque fois. Ferme le ticket quand tu as réservé.`
+      if (delta > 6) body += `\n\n📅 Les réservations pour ce jour ouvrent le ${openingLabel(request.date)} à 8h. Je commence la surveillance à ce moment-là.`
+      await comment(issue.number, body)
+      entry.acked = true
+    }
+    known[issue.number] = entry
+    if (delta <= 6) active.push({ issue, request, entry })
+  }
+
+  state.issues = known
+  if (active.length === 0) {
+    console.log(`${issues.length} demande(s) ouverte(s), aucune dans les 7 jours réservables : rien à vérifier.`)
+    await saveState(state)
+    return
+  }
+
+  let browser
   try {
+    browser = await chromium.launch({ headless: true })
     const page = await login(browser)
     console.log('Connecté à Paris Tennis.')
     const locations = matchLocations(await officialLocationNames(page), CENTRES)
-    console.log(`Centres surveillés : ${locations.join(', ')}`)
 
-    const all = []
-    for (const location of locations) {
-      for (const { label, weekday } of planningDates()) {
-        if (weekday === 0) continue // dimanche : fermeture à 18h, pas de créneau 18h/19h
-        all.push(...await readPlanning(page, location, label))
+    const dates = [...new Set(active.map(a => a.request.date))]
+    const slotsByDate = {}
+    for (const date of dates) {
+      slotsByDate[date] = []
+      for (const location of locations) {
+        slotsByDate[date].push(...await readPlanning(page, location, date))
         await page.waitForTimeout(1500) // on reste poli avec le site
       }
     }
 
-    const libres = filterSlots(all, HEURES)
-    const nouveaux = newSlots(libres, state.seen)
-    console.log(`${all.length} cases lues, ${libres.length} libre(s) à 18h/19h, ${nouveaux.length} nouveau(x).`)
-
-    if (nouveaux.length > 0) {
-      await notify(buildMessage(nouveaux))
-      console.log('Notification envoyée :\n' + buildMessage(nouveaux).message)
+    for (const { issue, request, entry } of active) {
+      const libres = filterSlots(slotsByDate[request.date], request.hours)
+      const nouveaux = newSlots(libres, entry.seen)
+      console.log(`#${issue.number} ${describeRequest(request)} : ${libres.length} libre(s), ${nouveaux.length} nouveau(x).`)
+      if (nouveaux.length > 0) {
+        const { title, message } = buildMessage(nouveaux)
+        const lines = message.split('\n').map(line => `- ${line}`).join('\n')
+        await comment(issue.number, `🎾 **Libre maintenant :**\n${lines}\n\n👉 [Réserver sur Paris Tennis](${LIEN_RESA}). Premier arrivé, premier servi.`)
+        await notify({ title, message }).catch(e => console.error(`ntfy : ${e.message}`))
+      }
+      entry.seen = libres.map(slotKey) // un court repris puis relibéré sera re-signalé
     }
-
-    // On mémorise ce qui est libre maintenant : un créneau repris puis relibéré sera re-signalé
-    await saveState({ seen: libres.map(slotKey), lastErrorAt: null })
+    state.lastErrorAt = null
   } catch (error) {
     console.error(`ERREUR : ${error.message}`)
     const last = state.lastErrorAt ? new Date(state.lastErrorAt) : null
     if (!last || Date.now() - last.getTime() > ERROR_REPEAT_HOURS * 3600e3) {
+      for (const { issue } of active) {
+        await comment(issue.number, `⚠️ Je n'arrive pas à vérifier les créneaux en ce moment : ${error.message}`).catch(() => {})
+      }
       await notify({ title: '⚠️ Alerte tennis en panne', message: error.message, priority: 2, tags: ['warning'] })
         .catch(e => console.error(`ntfy : ${e.message}`))
       state.lastErrorAt = new Date().toISOString()
     }
-    await saveState(state)
     process.exitCode = 1
   } finally {
-    await browser.close()
+    await saveState(state)
+    await browser?.close()
   }
 }
 
-run()
-
+run().catch(error => {
+  console.error(`ERREUR : ${error.message}`)
+  process.exitCode = 1
+})
