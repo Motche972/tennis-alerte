@@ -21,12 +21,12 @@ concurrency:
 
 jobs:
   surveiller:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -34,7 +34,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Cache du navigateur
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-v1
@@ -43,7 +43,7 @@ jobs:
         run: npx playwright install --with-deps --only-shell chromium
 
       - name: Récupérer les créneaux déjà signalés
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: state
           key: etat-${{ github.run_id }}
@@ -65,7 +65,7 @@ jobs:
 
       - name: Mémoriser les créneaux signalés
         if: ${{ always() && !inputs.test_notif }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: state
           key: etat-${{ github.run_id }}
