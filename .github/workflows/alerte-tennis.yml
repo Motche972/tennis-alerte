@@ -1,8 +1,11 @@
 name: Alerte tennis
 
 on:
+  # Dès que tu ouvres ou modifies une demande (ticket)
+  issues:
+    types: [opened, edited, reopened]
   schedule:
-    # Toutes les 20 min, de 7h à 21h40 heure de Paris l'été (6h-20h40 l'hiver).
+    # Puis toutes les 20 min, de 7h à 21h40 heure de Paris l'été (6h-20h40 l'hiver).
     # Les heures du cron sont en UTC.
     - cron: '7,27,47 5-19 * * *'
   workflow_dispatch:
@@ -14,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: alerte-tennis
@@ -61,6 +65,8 @@ jobs:
           ACCOUNT_EMAIL: ${{ secrets.ACCOUNT_EMAIL }}
           ACCOUNT_PASSWORD: ${{ secrets.ACCOUNT_PASSWORD }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: npm run watch
 
       - name: Mémoriser les créneaux signalés
